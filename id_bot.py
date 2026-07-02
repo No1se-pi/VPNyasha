@@ -7,7 +7,7 @@ from aiogram.types import Message
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
-API_TOKEN = "8554540050:AAFjF0X7b6SHbSmom7ZEQ8_7Pj2BbtbwCAg"
+API_TOKEN = ""
 
 logging.basicConfig(level=logging.INFO)
 
