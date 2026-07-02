@@ -1,0 +1,1 @@
+tg://proxy?server=82.21.117.170&port=8443&secret=d04d3f3a5c3cf086a706bc9d491c9d81
