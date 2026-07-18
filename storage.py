@@ -187,7 +187,10 @@ def load_users():
                 referral_code=referral_code,
                 referred_by=raw.get("referred_by"),
                 referral_rewarded_at=_parse_dt(raw.get("referral_rewarded_at")),
-                processed_order_ids=[str(order_id) for order_id in raw.get("processed_order_ids", [])],
+                processed_order_ids=[
+                    str(order_id)
+                    for order_id in (raw.get("processed_order_ids") or [])
+                ],
                 created_at=_parse_dt(raw.get("created_at")) or now,
                 updated_at=_parse_dt(raw.get("updated_at")),
             )
@@ -272,8 +275,9 @@ def grant_access(
         user.has_vpn = vpn
         user.has_proxy = proxy
         if vpn_key:
-            user.vpn_key = vpn_key
             user.vpn_keys[country_code] = vpn_key
+            if country_code == "de":
+                user.vpn_key = vpn_key
         user.last_country = country_code
         user.last_plan = plan_label
         user.last_payment_at = now

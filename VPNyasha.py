@@ -14,6 +14,7 @@ from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.strategy import FSMStrategy
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
@@ -52,7 +53,7 @@ load_users()
 load_purchase_orders()
 
 logging.basicConfig(level=logging.INFO)
-dp = Dispatcher(storage=MemoryStorage())
+dp = Dispatcher(storage=MemoryStorage(), fsm_strategy=FSMStrategy.GLOBAL_USER)
 
 BASE_DIR = Path(__file__).resolve().parent
 PROXY_FILE = BASE_DIR / "proxy_url.txt"
@@ -91,11 +92,17 @@ DURATION_OPTIONS = {
 DOWNLOAD_LINKS = {
     "ios": "https://apps.apple.com/us/app/amneziavpn/id1600529900",
     "ios_fallback": "https://apps.apple.com/ru/app/defaultvpn/id6744725017",
-    "android": "https://play.google.com/store/apps/details?id=org.amnezia.vpn&utm_source=amnezia.org&utm_campaign=organic&utm_medium=referral",
+    "android": (
+        "https://play.google.com/store/apps/details?id=org.amnezia.vpn"
+        "&utm_source=amnezia.org&utm_campaign=organic&utm_medium=referral"
+    ),
     "apk": "https://github.com/amnezia-vpn/amnezia-client/releases/tag/4.8.19.0",
     "windows": "https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.19.0/AmneziaVPN_4.8.19.0_x64.exe",
     "macos": "https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.19.0/AmneziaVPN_4.8.19.0_macos.pkg",
-    "linux": "https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.19.0/AmneziaVPN_4.8.19.0_linux_x64.tar",
+    "linux": (
+        "https://github.com/amnezia-vpn/amnezia-client/releases/download/4.8.19.0/"
+        "AmneziaVPN_4.8.19.0_linux_x64.tar"
+    ),
     "github": "https://github.com/amnezia-vpn/amnezia-client/releases/tag/4.8.19.0",
 }
 
@@ -315,6 +322,7 @@ def promotions_kb() -> InlineKeyboardMarkup:
 def admin_panel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="🧾 Чеки на проверке", callback_data="adm_orders")],
             [InlineKeyboardButton(text="👥 Пользователи", callback_data="adm_page_0")],
             [InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="adm_add_user")],
             [InlineKeyboardButton(text="📰 News", callback_data="adm_news")],
@@ -383,15 +391,16 @@ def admin_duration_kb(user_id: int, country_code: str, service_code: str) -> Inl
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def order_review_kb(order_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
+def order_review_kb(order_id: str, back_to_orders: bool = False) -> InlineKeyboardMarkup:
+    keyboard = [
             [
                 InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"order_confirm_{order_id}"),
                 InlineKeyboardButton(text="❌ Отклонить", callback_data=f"order_reject_{order_id}"),
             ]
         ]
-    )
+    if back_to_orders:
+        keyboard.append([InlineKeyboardButton(text="← К списку чеков", callback_data="adm_orders")])
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
 def sorted_users_for_admin():
@@ -452,6 +461,39 @@ def admin_users_text(page: int) -> tuple[str, InlineKeyboardMarkup]:
         nav.append(InlineKeyboardButton(text="→", callback_data=f"adm_page_{page + 1}"))
     if nav:
         keyboard.append(nav)
+    keyboard.append([InlineKeyboardButton(text="Назад в админку", callback_data="adm_panel")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def admin_orders_text() -> tuple[str, InlineKeyboardMarkup]:
+    open_orders = sorted(
+        get_open_purchase_orders(),
+        key=lambda order: order.created_at or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    lines = ["<b>Чеки на проверке</b>"]
+    keyboard = []
+    if not open_orders:
+        lines.append("\nНовых чеков нет.")
+    else:
+        lines.append(f"\nВсего заявок: <b>{len(open_orders)}</b>")
+        status_labels = {
+            "pending": "новый",
+            "awaiting_key": "ждёт ключ",
+            "processing": "обрабатывается",
+        }
+        for order in open_orders[:30]:
+            user = users.get(order.user_id)
+            user_name = plain_user_name(user) if user else f"id {order.user_id}"
+            label = (
+                f"#{order.order_id} · {user_name} · {country_label(order.country_code)} · "
+                f"{status_labels.get(order.status, order.status)}"
+            )
+            keyboard.append(
+                [InlineKeyboardButton(text=label[:64], callback_data=f"adm_order_{order.order_id}")]
+            )
+        if len(open_orders) > 30:
+            lines.append("\nПоказаны последние 30 заявок.")
     keyboard.append([InlineKeyboardButton(text="Назад в админку", callback_data="adm_panel")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -557,13 +599,16 @@ def help_text() -> str:
     return (
         "<b>Помощь VPNyasha</b>\n\n"
         "<b>Что такое VPN?</b>\n"
-        "Это защищённый туннель для интернета через удалённый сервер. Сайты видят IP сервера, а не твой реальный IP.\n\n"
+        "Это защищённый туннель для интернета через удалённый сервер. "
+        "Сайты видят IP сервера, а не твой реальный IP.\n\n"
         "<b>Какие страны доступны?</b>\n"
         "VPN: 🇩🇪 Германия и 🇺🇸 США. Proxy пока доступен только в Германии.\n\n"
         "<b>Что такое Proxy для Telegram?</b>\n"
-        "Proxy работает только внутри Telegram и помогает открыть Telegram, если он плохо грузится. Для сайтов и приложений нужен VPN.\n\n"
+        "Proxy работает только внутри Telegram и помогает открыть Telegram, если он плохо грузится. "
+        "Для сайтов и приложений нужен VPN.\n\n"
         "<b>Как оплатить?</b>\n"
-        "Нажми «Подключиться к VPN ⚡», выбери страну, услугу и срок, оплати по ссылке, затем отправь чек прямо в бот. Администратор проверит его и выдаст ключ.\n\n"
+        "Нажми «Подключиться к VPN ⚡», выбери страну, услугу и срок, оплати по ссылке, "
+        "затем отправь чек прямо в бот. Администратор проверит его и выдаст ключ.\n\n"
         "<b>Как получить VPN по шагам?</b>\n"
         "1. Скачай AmneziaVPN.\n"
         "2. Открой бота и выбери страну, услугу и срок.\n"
@@ -577,9 +622,11 @@ def help_text() -> str:
         "<b>Если Telegram не открывается?</b>\n"
         "Временно включи любой бесплатный VPN или Telegram Proxy, зайди в Telegram и получи основной ключ в боте.\n\n"
         "<b>Если ключ не импортируется?</b>\n"
-        "Проверь, что ключ скопирован целиком и начинается с <code>vpn://</code>. Если ошибка остаётся, пришли скрин в поддержку.\n\n"
+        "Проверь, что ключ скопирован целиком и начинается с <code>vpn://</code>. "
+        "Если ошибка остаётся, пришли скрин в поддержку.\n\n"
         "<b>Как продлить?</b>\n"
-        "Открой «Мой профиль 😎» → «Продлить доступ», выбери страну и отправь новый чек. При продлении в той же стране VPN ключ остаётся прежним.\n\n"
+        "Открой «Мой профиль 😎» → «Продлить доступ», выбери страну и отправь новый чек. "
+        "При продлении в той же стране VPN ключ остаётся прежним.\n\n"
         "<b>Где мой реферальный код?</b>\n"
         "Открой «Мой профиль 😎» → «Реферальная программа». За оплаченного друга начисляется 14 дней.\n\n"
         "<b>VPN или Proxy не работает?</b>\n"
@@ -678,7 +725,11 @@ def build_access_message(
         lines.extend(
             [
                 "Актуальный Proxy:",
-                f"<code>{h(proxy_url)}</code>" if proxy_url else "Прокси пока не создан. Я пришлю его отдельным сообщением.",
+                (
+                    f"<code>{h(proxy_url)}</code>"
+                    if proxy_url
+                    else "Прокси пока не создан. Я пришлю его отдельным сообщением."
+                ),
                 "",
             ]
         )
@@ -856,6 +907,13 @@ async def ensure_admin_callback(callback: CallbackQuery) -> bool:
 
 @dp.message(Command("cancel"))
 async def cmd_cancel(message: Message, state: FSMContext):
+    current_state = await state.get_state()
+    if current_state == AdminStates.waiting_order_vpn_key.state:
+        data = await state.get_data()
+        order_id = data.get("order_id", "")
+        order = get_purchase_order(order_id)
+        if order and order.status == "awaiting_key" and order.reviewed_by == message.from_user.id:
+            transition_purchase_order(order_id, {"awaiting_key"}, "pending")
     await state.clear()
     await message.answer("Ок, отменил.", reply_markup=main_menu_kb(message.from_user.id))
 
@@ -1052,7 +1110,10 @@ async def handle_purchase_receipt(message: Message, state: FSMContext):
         or not service_available(country_code, service_code)
     ):
         await state.clear()
-        await message.answer("Данные тарифа устарели. Начни подключение заново.", reply_markup=main_menu_kb(message.from_user.id))
+        await message.answer(
+            "Данные тарифа устарели. Начни подключение заново.",
+            reply_markup=main_menu_kb(message.from_user.id),
+        )
         return
 
     user = get_or_create_user(message.from_user.id, message.from_user.username)
@@ -1350,10 +1411,10 @@ async def callback_order_confirm(callback: CallbackQuery, state: FSMContext):
     service = SERVICE_OPTIONS[order.service_code]
     existing_key = get_vpn_key(user, order.country_code)
     if service["vpn"] and not existing_key:
-        if order.status == "pending":
+        if order.status in {"pending", "processing"}:
             order = transition_purchase_order(
                 order_id,
-                {"pending"},
+                {order.status},
                 "awaiting_key",
                 reviewed_by=callback.from_user.id,
             )
@@ -1370,11 +1431,21 @@ async def callback_order_confirm(callback: CallbackQuery, state: FSMContext):
             processed_order_text(order, user, "⏳ Оплата подтверждается: ожидается VPN ключ."),
             reply_markup=order_review_kb(order.order_id),
         )
-        await callback.message.answer(
-            f"Пришли VPN ключ для заявки <code>#{h(order_id)}</code>.\n"
-            f"Страна: <b>{h(country_label(order.country_code))}</b>\n"
-            "Формат: <code>vpn://...</code>"
-        )
+        try:
+            await callback.bot.send_message(
+                callback.from_user.id,
+                f"Пришли VPN ключ для заявки <code>#{h(order_id)}</code>.\n"
+                f"Страна: <b>{h(country_label(order.country_code))}</b>\n"
+                "Формат: <code>vpn://...</code>",
+            )
+        except Exception:
+            transition_purchase_order(order_id, {"awaiting_key"}, "pending")
+            await state.clear()
+            await callback.answer(
+                "Не могу написать тебе лично. Сначала открой бота в личке и нажми /start.",
+                show_alert=True,
+            )
+            return
         await callback.answer("Жду VPN ключ")
         return
 
@@ -1458,6 +1529,40 @@ async def callback_admin_panel(callback: CallbackQuery):
     await show_admin_panel(callback)
 
 
+@dp.callback_query(F.data == "adm_orders")
+async def callback_admin_orders(callback: CallbackQuery):
+    if not await ensure_admin_callback(callback):
+        return
+    text, keyboard = admin_orders_text()
+    await callback.message.edit_text(text, reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("adm_order_"))
+async def callback_admin_order(callback: CallbackQuery):
+    if not await ensure_admin_callback(callback):
+        return
+    order_id = callback.data.removeprefix("adm_order_")
+    order = get_purchase_order(order_id)
+    if not order or order.status not in {"pending", "awaiting_key", "processing"}:
+        await callback.answer("Заявка уже обработана или не найдена.", show_alert=True)
+        return
+    user = users.get(order.user_id)
+    if not user:
+        await callback.answer("Пользователь не найден.", show_alert=True)
+        return
+    status_labels = {
+        "pending": "⏳ Ожидает решения администратора.",
+        "awaiting_key": "⏳ Оплата подтверждается: ожидается VPN ключ.",
+        "processing": "⏳ Выдача была начата; подтверждение можно безопасно повторить.",
+    }
+    await callback.message.edit_text(
+        processed_order_text(order, user, status_labels[order.status]),
+        reply_markup=order_review_kb(order.order_id, back_to_orders=True),
+    )
+    await callback.answer()
+
+
 @dp.callback_query(F.data.startswith("adm_page_"))
 async def callback_admin_users(callback: CallbackQuery):
     if not await ensure_admin_callback(callback):
@@ -1473,7 +1578,10 @@ async def callback_admin_add_user(callback: CallbackQuery, state: FSMContext):
     if not await ensure_admin_callback(callback):
         return
     await state.set_state(AdminStates.waiting_user_lookup)
-    await callback.message.answer("Пришли @username или user_id пользователя, которому нужно выдать доступ. Отмена: /cancel")
+    await callback.message.answer(
+        "Пришли @username или user_id пользователя, которому нужно выдать доступ. "
+        "Отмена: /cancel"
+    )
     await callback.answer()
 
 
@@ -1590,7 +1698,8 @@ async def callback_admin_duration(callback: CallbackQuery, state: FSMContext):
     key_text = "\nVPN ключ оставлен прежним." if service["vpn"] and existing_key else ""
     bonus_text = "\nРеферальный бонус начислен 🎁" if referral_bonus else ""
     await callback.message.edit_text(
-        f"{format_user_name(granted_user)} получил доступ до <b>{format_dt(granted_user.access_until)}</b> ✅{key_text}{bonus_text}",
+        f"{format_user_name(granted_user)} получил доступ до "
+        f"<b>{format_dt(granted_user.access_until)}</b> ✅{key_text}{bonus_text}",
         reply_markup=admin_user_kb(granted_user.user_id),
     )
     await callback.answer()
@@ -1620,7 +1729,8 @@ async def callback_admin_news(callback: CallbackQuery, state: FSMContext):
         return
     await state.set_state(AdminStates.waiting_news)
     await callback.message.answer(
-        "Пришли текст новости или фото с подписью. Я скопирую сообщение всем пользователям: ссылки, форматирование и подпись сохранятся, автор не будет показан. Отмена: /cancel"
+        "Пришли текст новости или фото с подписью. Я скопирую сообщение всем пользователям: "
+        "ссылки, форматирование и подпись сохранятся, автор не будет показан. Отмена: /cancel"
     )
     await callback.answer()
 
