@@ -261,6 +261,7 @@ def grant_access(
     vpn: bool = False,
     proxy: bool = False,
     vpn_key: str = "",
+    vpn_keys: Optional[Dict[str, str]] = None,
     country_code: str = "de",
     plan_label: str = "",
     order_id: str = "",
@@ -274,10 +275,15 @@ def grant_access(
         now = utc_now()
         user.has_vpn = vpn
         user.has_proxy = proxy
+        keys_to_store = dict(vpn_keys or {})
         if vpn_key:
-            user.vpn_keys[country_code] = vpn_key
-            if country_code == "de":
-                user.vpn_key = vpn_key
+            keys_to_store[country_code] = vpn_key
+        for key_country_code, key_value in keys_to_store.items():
+            if not key_value:
+                continue
+            user.vpn_keys[key_country_code] = key_value
+            if key_country_code == "de":
+                user.vpn_key = key_value
         user.last_country = country_code
         user.last_plan = plan_label
         user.last_payment_at = now

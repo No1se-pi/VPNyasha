@@ -5,7 +5,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
-from typing import Optional, Tuple
+from types import SimpleNamespace
+from typing import Dict, List, Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -76,10 +77,18 @@ SERVICE_OPTIONS = {
 COUNTRY_OPTIONS = {
     "de": {"title": "Германия", "flag": "🇩🇪", "proxy_available": True},
     "us": {"title": "США", "flag": "🇺🇸", "proxy_available": False},
+    "bundle": {
+        "title": "Комплект",
+        "flag": "🇩🇪 + 🇺🇸",
+        "proxy_available": False,
+    },
 }
 
 PROMO_DISCOUNT_PERCENT = Decimal("33.33")
 PROMO_PRICE_FACTOR = Decimal("0.6667")
+BUNDLE_PRICE_MULTIPLIER = Decimal("1.5")
+BUNDLE_COUNTRY_CODE = "bundle"
+BUNDLE_VPN_COUNTRIES = ("de", "us")
 
 DURATION_OPTIONS = {
     "1m": {"title": "1 месяц", "days": 30, "months": 1},
@@ -170,26 +179,84 @@ def country_label(country_code: str) -> str:
     return f"{country['flag']} {country['title']}"
 
 
+def vpn_country_codes(country_code: str) -> Tuple[str, ...]:
+    if country_code == BUNDLE_COUNTRY_CODE:
+        return BUNDLE_VPN_COUNTRIES
+    if country_code in COUNTRY_OPTIONS:
+        return (country_code,)
+    return ()
+
+
+def vpn_keys_for(user, country_code: str) -> Dict[str, str]:
+    return {
+        key_country_code: get_vpn_key(user, key_country_code)
+        for key_country_code in vpn_country_codes(country_code)
+        if get_vpn_key(user, key_country_code)
+    }
+
+
+def missing_vpn_country_codes(user, country_code: str) -> List[str]:
+    return [
+        key_country_code
+        for key_country_code in vpn_country_codes(country_code)
+        if not get_vpn_key(user, key_country_code)
+    ]
+
+
+def parse_vpn_keys(raw_value: str, country_codes: List[str]) -> Optional[Dict[str, str]]:
+    keys = [line.strip() for line in raw_value.splitlines() if line.strip()]
+    if len(keys) != len(country_codes) or any(not key.startswith("vpn://") for key in keys):
+        return None
+    return dict(zip(country_codes, keys))
+
+
 def service_available(country_code: str, service_code: str) -> bool:
     country = COUNTRY_OPTIONS.get(country_code)
     service = SERVICE_OPTIONS.get(service_code)
     if not country or not service:
         return False
+    if country_code == BUNDLE_COUNTRY_CODE:
+        return service_code == "vpn"
     return country["proxy_available"] or not service["proxy"]
 
 
-def original_price_for(service_code: str, duration_code: str) -> int:
-    return SERVICE_OPTIONS[service_code]["price"] * DURATION_OPTIONS[duration_code]["months"]
+def original_price_for(
+    service_code: str,
+    duration_code: str,
+    country_code: str = "de",
+) -> int:
+    original_price = SERVICE_OPTIONS[service_code]["price"] * DURATION_OPTIONS[duration_code]["months"]
+    if country_code == BUNDLE_COUNTRY_CODE:
+        single_promo_price = int(
+            (Decimal(original_price) * PROMO_PRICE_FACTOR).quantize(
+                Decimal("1"),
+                rounding=ROUND_HALF_UP,
+            )
+        )
+        return single_promo_price * 2
+    return original_price
 
 
-def price_for(service_code: str, duration_code: str) -> int:
-    original_price = original_price_for(service_code, duration_code)
-    return int(
-        (Decimal(original_price) * PROMO_PRICE_FACTOR).quantize(
+def price_for(
+    service_code: str,
+    duration_code: str,
+    country_code: str = "de",
+) -> int:
+    single_original_price = original_price_for(service_code, duration_code)
+    single_promo_price = int(
+        (Decimal(single_original_price) * PROMO_PRICE_FACTOR).quantize(
             Decimal("1"),
             rounding=ROUND_HALF_UP,
         )
     )
+    if country_code == BUNDLE_COUNTRY_CODE:
+        return int(
+            (Decimal(single_promo_price) * BUNDLE_PRICE_MULTIPLIER).quantize(
+                Decimal("1"),
+                rounding=ROUND_HALF_UP,
+            )
+        )
+    return single_promo_price
 
 
 def short_status_text(user, now: Optional[datetime] = None) -> str:
@@ -229,7 +296,13 @@ def country_choice_kb_user() -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🇩🇪 Германия", callback_data="buy_country_de"),
                 InlineKeyboardButton(text="🇺🇸 США", callback_data="buy_country_us"),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🇩🇪 + 🇺🇸 Комплект ×1,5",
+                    callback_data="buy_country_bundle",
+                )
+            ],
         ]
     )
 
@@ -243,9 +316,13 @@ def access_choice_kb_user(country_code: str) -> InlineKeyboardMarkup:
                 [InlineKeyboardButton(text="VPN + Proxy", callback_data=f"buy_svc_{country_code}_both")],
             ]
         )
-    else:
+    elif country_code == "us":
         keyboard.append(
             [InlineKeyboardButton(text="Proxy — скоро", callback_data="buy_proxy_unavailable")]
+        )
+    else:
+        keyboard.append(
+            [InlineKeyboardButton(text="В комплекте только VPN", callback_data="buy_bundle_vpn_only")]
         )
     keyboard.append([InlineKeyboardButton(text="← К выбору страны", callback_data="buy_back_countries")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -254,8 +331,8 @@ def access_choice_kb_user(country_code: str) -> InlineKeyboardMarkup:
 def duration_choice_kb_user(country_code: str, service_code: str) -> InlineKeyboardMarkup:
     keyboard = []
     for duration_code, option in DURATION_OPTIONS.items():
-        original_price = original_price_for(service_code, duration_code)
-        price = price_for(service_code, duration_code)
+        original_price = original_price_for(service_code, duration_code, country_code)
+        price = price_for(service_code, duration_code, country_code)
         keyboard.append(
             [
                 InlineKeyboardButton(
@@ -329,6 +406,7 @@ def admin_panel_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🧾 Чеки на проверке", callback_data="adm_orders")],
+            [InlineKeyboardButton(text="🧪 Тест сообщений", callback_data="adm_test_messages")],
             [InlineKeyboardButton(text="👥 Пользователи", callback_data="adm_page_0")],
             [InlineKeyboardButton(text="➕ Добавить пользователя", callback_data="adm_add_user")],
             [InlineKeyboardButton(text="📰 News", callback_data="adm_news")],
@@ -352,6 +430,12 @@ def admin_country_kb(user_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🇩🇪 Германия", callback_data=f"adm_country_{user_id}_de"),
                 InlineKeyboardButton(text="🇺🇸 США", callback_data=f"adm_country_{user_id}_us"),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="🇩🇪 + 🇺🇸 Комплект ×1,5",
+                    callback_data=f"adm_country_{user_id}_bundle",
+                )
             ],
             [InlineKeyboardButton(text="Назад", callback_data=f"adm_user_{user_id}")],
         ]
@@ -407,6 +491,17 @@ def order_review_kb(order_id: str, back_to_orders: bool = False) -> InlineKeyboa
     if back_to_orders:
         keyboard.append([InlineKeyboardButton(text="← К списку чеков", callback_data="adm_orders")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def admin_test_order_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data="adm_test_noop_confirm"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data="adm_test_noop_reject"),
+            ]
+        ]
+    )
 
 
 def sorted_users_for_admin():
@@ -485,7 +580,7 @@ def admin_orders_text() -> Tuple[str, InlineKeyboardMarkup]:
         lines.append(f"\nВсего заявок: <b>{len(open_orders)}</b>")
         status_labels = {
             "pending": "новый",
-            "awaiting_key": "ждёт ключ",
+            "awaiting_key": "ждёт ключи",
             "processing": "обрабатывается",
         }
         for order in open_orders[:30]:
@@ -594,6 +689,9 @@ def promotions_text() -> str:
         "<b>🇺🇸 США на старте: −33,33% на всё</b>\n"
         "Пока знакомим нашу VPNяшу с новым сервером, все тарифы во всех странах дешевле на треть. "
         "Например, VPN на месяц: <s>150 ₽</s> → <b>100 ₽</b>.\n\n"
+        "<b>🇩🇪 + 🇺🇸 Комплект двух стран</b>\n"
+        "Германия и США вместе стоят не ×2, а всего <b>×1,5</b> от одного VPN-тарифа. "
+        "На месяц это <s>200 ₽</s> → <b>150 ₽</b> по текущим акционным ценам.\n\n"
         "<b>🎁 Интернет по дружбе</b>\n"
         f"Пригласи друга по своему коду — после его первой подтверждённой оплаты получишь "
         f"<b>{REFERRAL_BONUS_DAYS} дней</b> доступа. Друг получает VPN, ты — ещё две недели. "
@@ -608,7 +706,8 @@ def help_text() -> str:
         "Это защищённый туннель для интернета через удалённый сервер. "
         "Сайты видят IP сервера, а не твой реальный IP.\n\n"
         "<b>Какие страны доступны?</b>\n"
-        "VPN: 🇩🇪 Германия и 🇺🇸 США. Proxy пока доступен только в Германии.\n\n"
+        "VPN: 🇩🇪 Германия, 🇺🇸 США или комплект из двух стран за ×1,5 цены. "
+        "Proxy пока доступен только в Германии.\n\n"
         "<b>Что такое Proxy для Telegram?</b>\n"
         "Proxy работает только внутри Telegram и помогает открыть Telegram, если он плохо грузится. "
         "Для сайтов и приложений нужен VPN.\n\n"
@@ -677,17 +776,22 @@ async def safe_copy_message(bot: Bot, chat_id: int, from_chat_id: int, message_i
         return False
 
 
-def download_links_text() -> str:
-    return (
-        "<b>Скачать AmneziaVPN:</b>\n"
-        f"iOS: <a href='{h(DOWNLOAD_LINKS['ios'])}'>App Store</a>"
-        f" / <a href='{h(DOWNLOAD_LINKS['ios_fallback'])}'>если недоступно</a>\n"
-        f"Android: <a href='{h(DOWNLOAD_LINKS['android'])}'>Google Play</a>"
-        f" / <a href='{h(DOWNLOAD_LINKS['apk'])}'>APK</a>\n"
-        f"Windows: <a href='{h(DOWNLOAD_LINKS['windows'])}'>скачать</a>\n"
-        f"macOS: <a href='{h(DOWNLOAD_LINKS['macos'])}'>скачать</a>\n"
-        f"Linux: <a href='{h(DOWNLOAD_LINKS['linux'])}'>скачать</a>\n"
-        f"GitHub: <a href='{h(DOWNLOAD_LINKS['github'])}'>релиз 4.8.19.0</a>"
+def download_links_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📱 iOS", url=DOWNLOAD_LINKS["ios"]),
+                InlineKeyboardButton(text="🤖 Android", url=DOWNLOAD_LINKS["android"]),
+            ],
+            [
+                InlineKeyboardButton(text="🪟 Windows", url=DOWNLOAD_LINKS["windows"]),
+                InlineKeyboardButton(text="🍎 macOS", url=DOWNLOAD_LINKS["macos"]),
+            ],
+            [
+                InlineKeyboardButton(text="🐧 Linux", url=DOWNLOAD_LINKS["linux"]),
+                InlineKeyboardButton(text="📦 APK / GitHub", url=DOWNLOAD_LINKS["github"]),
+            ],
+        ]
     )
 
 
@@ -697,11 +801,15 @@ def build_access_message(
     service_code: str,
     duration_code: str,
     vpn_key: str = "",
+    vpn_keys: Optional[Dict[str, str]] = None,
     extension_only: bool = False,
 ) -> str:
     service = SERVICE_OPTIONS[service_code]
     duration = DURATION_OPTIONS[duration_code]
-    key = vpn_key or get_vpn_key(user, country_code)
+    resolved_vpn_keys = vpn_keys_for(user, country_code)
+    resolved_vpn_keys.update(vpn_keys or {})
+    if vpn_key and country_code != BUNDLE_COUNTRY_CODE:
+        resolved_vpn_keys[country_code] = vpn_key
 
     lines = [
         "Доступ продлён ✅" if extension_only else "Доступ выдан ✅",
@@ -713,18 +821,33 @@ def build_access_message(
     ]
 
     if extension_only and service["vpn"]:
-        lines.extend(["VPN ключ остался прежним.", ""])
+        key_status = (
+            "VPN ключи остались прежними."
+            if country_code == BUNDLE_COUNTRY_CODE
+            else "VPN ключ остался прежним."
+        )
+        lines.extend([key_status, ""])
     elif service["vpn"]:
+        import_step = (
+            "2. Импортируй оба ключа в приложение по очереди:"
+            if country_code == BUNDLE_COUNTRY_CODE
+            else "2. Импортируй ключ в приложение:"
+        )
         lines.extend(
             [
                 "Инструкция для VPN:",
-                "1. Установи AmnezyaVPN:",
-                download_links_text(),
-                "2. Импортируй ключ:",
-                f"<pre>{h(key)}</pre>" if key else "Ключ скоро пришлю отдельным сообщением.",
-                "",
+                "1. Скачай AmneziaVPN по кнопкам под сообщением.",
+                import_step,
             ]
         )
+        for key_country_code in vpn_country_codes(country_code):
+            key = resolved_vpn_keys.get(key_country_code, "")
+            if country_code == BUNDLE_COUNTRY_CODE:
+                lines.append(f"<b>{h(country_label(key_country_code))}</b>")
+            lines.append(
+                f"<pre>{h(key)}</pre>" if key else "Ключ скоро пришлю отдельным сообщением."
+            )
+        lines.append("")
 
     if service["proxy"]:
         proxy_url = read_proxy_url()
@@ -756,6 +879,7 @@ async def grant_and_notify(
     service_code: str,
     duration_code: str,
     vpn_key: str = "",
+    vpn_keys: Optional[Dict[str, str]] = None,
     extension_only: bool = False,
     order_id: str = "",
 ):
@@ -769,6 +893,7 @@ async def grant_and_notify(
         vpn=service["vpn"],
         proxy=service["proxy"],
         vpn_key=vpn_key,
+        vpn_keys=vpn_keys,
         country_code=country_code,
         plan_label=plan_label,
         order_id=order_id,
@@ -785,10 +910,12 @@ async def grant_and_notify(
             service_code,
             duration_code,
             vpn_key,
+            vpn_keys,
             extension_only,
         ),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
+        reply_markup=download_links_kb() if service["vpn"] else None,
     )
 
     referral_bonus = apply_referral_bonus(user.user_id)
@@ -830,6 +957,64 @@ def purchase_order_text(order, user) -> str:
     )
 
 
+def receipt_accepted_text(order) -> str:
+    key_word = "ключи" if order.country_code == BUNDLE_COUNTRY_CODE else "ключ"
+    delivery_text = (
+        f"пришлёт {key_word} или продлит доступ"
+        if SERVICE_OPTIONS[order.service_code]["vpn"]
+        else "активирует или продлит Proxy"
+    )
+    return (
+        "Чек принят ✅\n\n"
+        f"Заявка: <code>#{h(order.order_id)}</code>\n"
+        f"Страна: <b>{h(country_label(order.country_code))}</b>\n"
+        f"Сумма: <b>{order.price} ₽</b>\n\n"
+        f"Администратор проверит оплату. После подтверждения бот сам {delivery_text}."
+    )
+
+
+def vpn_key_input_format(country_codes: List[str]) -> str:
+    if len(country_codes) == 1:
+        return (
+            f"Нужен ключ: <b>{h(country_label(country_codes[0]))}</b>\n"
+            "Отправь его одним сообщением в формате <code>vpn://...</code>."
+        )
+
+    lines = [
+        "Отправь ключи <b>одним сообщением, каждый с новой строки</b> в указанном порядке:"
+    ]
+    for index, key_country_code in enumerate(country_codes, start=1):
+        lines.append(f"{index}. <b>{h(country_label(key_country_code))}</b> — <code>vpn://...</code>")
+    return "\n".join(lines)
+
+
+def order_vpn_key_request_text(order, country_codes: List[str]) -> str:
+    return (
+        "🔐 <b>Служебное сообщение для администратора</b>\n\n"
+        f"Заявка: <code>#{h(order.order_id)}</code>\n"
+        f"Тариф: <b>{h(country_label(order.country_code))}</b>\n\n"
+        f"{vpn_key_input_format(country_codes)}\n\n"
+        "Покупателю ключи присылать не нужно — после ввода бот отправит их сам."
+    )
+
+
+def manual_vpn_key_request_text(
+    user,
+    country_code: str,
+    service_code: str,
+    duration_code: str,
+    country_codes: List[str],
+) -> str:
+    return (
+        "🔐 <b>Служебное сообщение для администратора</b>\n\n"
+        f"Пользователь: {format_user_name(user)}\n"
+        f"Тариф: <b>{h(country_label(country_code))} · "
+        f"{h(SERVICE_OPTIONS[service_code]['title'])} · "
+        f"{h(DURATION_OPTIONS[duration_code]['title'])}</b>\n\n"
+        f"{vpn_key_input_format(country_codes)}"
+    )
+
+
 def processed_order_text(order, user, status_text: str) -> str:
     return f"{purchase_order_text(order, user)}\n\n<b>{h(status_text)}</b>"
 
@@ -847,7 +1032,13 @@ async def update_order_admin_card(bot: Bot, order, text: str):
         logging.warning("Failed to update purchase order %s: %s", order.order_id, exc)
 
 
-async def finalize_purchase_order(bot: Bot, order_id: str, admin_id: int, vpn_key: str = ""):
+async def finalize_purchase_order(
+    bot: Bot,
+    order_id: str,
+    admin_id: int,
+    vpn_key: str = "",
+    vpn_keys: Optional[Dict[str, str]] = None,
+):
     order = get_purchase_order(order_id)
     if not order:
         return None, None, "Заявка не найдена."
@@ -856,7 +1047,7 @@ async def finalize_purchase_order(bot: Bot, order_id: str, admin_id: int, vpn_ke
     if not user:
         return None, None, "Пользователь не найден."
 
-    existing_key = get_vpn_key(user, order.country_code)
+    existing_keys_complete = not missing_vpn_country_codes(user, order.country_code)
     claimed_order = transition_purchase_order(
         order_id,
         {"pending", "awaiting_key", "processing"},
@@ -874,7 +1065,10 @@ async def finalize_purchase_order(bot: Bot, order_id: str, admin_id: int, vpn_ke
             order.service_code,
             order.duration_code,
             vpn_key=vpn_key,
-            extension_only=bool(SERVICE_OPTIONS[order.service_code]["vpn"] and existing_key),
+            vpn_keys=vpn_keys,
+            extension_only=bool(
+                SERVICE_OPTIONS[order.service_code]["vpn"] and existing_keys_complete
+            ),
             order_id=order.order_id,
         )
     except Exception:
@@ -988,16 +1182,24 @@ async def handle_admin_vpn_key(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    if not message.text or not message.text.strip().startswith("vpn://"):
-        await message.answer("Пришли VPN ключ в формате <code>vpn://...</code> или /cancel.")
+    data = await state.get_data()
+    missing_country_codes = list(data.get("missing_country_codes") or [])
+    parsed_vpn_keys = (
+        parse_vpn_keys(message.text, missing_country_codes)
+        if message.text and missing_country_codes
+        else None
+    )
+    if not parsed_vpn_keys:
+        await message.answer(
+            f"Формат не распознан.\n\n{vpn_key_input_format(missing_country_codes)}\n\n"
+            "Отмена: /cancel."
+        )
         return
 
-    data = await state.get_data()
     target_user_id = int(data["target_user_id"])
     country_code = data["country_code"]
     service_code = data["service_code"]
     duration_code = data["duration_code"]
-    vpn_key = message.text.strip()
 
     user, referral_bonus = await grant_and_notify(
         message.bot,
@@ -1005,7 +1207,7 @@ async def handle_admin_vpn_key(message: Message, state: FSMContext):
         country_code,
         service_code,
         duration_code,
-        vpn_key=vpn_key,
+        vpn_keys=parsed_vpn_keys,
     )
     await state.clear()
 
@@ -1025,12 +1227,21 @@ async def handle_order_vpn_key(message: Message, state: FSMContext):
     if not is_admin(message.from_user.id):
         await state.clear()
         return
-    if not message.text or not message.text.strip().startswith("vpn://"):
-        await message.answer("Пришли VPN ключ в формате <code>vpn://...</code> или /cancel.")
-        return
-
     data = await state.get_data()
     order_id = data.get("order_id", "")
+    missing_country_codes = list(data.get("missing_country_codes") or [])
+    parsed_vpn_keys = (
+        parse_vpn_keys(message.text, missing_country_codes)
+        if message.text and missing_country_codes
+        else None
+    )
+    if not parsed_vpn_keys:
+        await message.answer(
+            f"Формат не распознан.\n\n{vpn_key_input_format(missing_country_codes)}\n\n"
+            "Отмена: /cancel."
+        )
+        return
+
     order = get_purchase_order(order_id)
     if not order or order.status != "awaiting_key":
         await state.clear()
@@ -1046,7 +1257,7 @@ async def handle_order_vpn_key(message: Message, state: FSMContext):
             message.bot,
             order_id,
             message.from_user.id,
-            vpn_key=message.text.strip(),
+            vpn_keys=parsed_vpn_keys,
         )
     except Exception as exc:
         logging.exception("Failed to approve purchase order %s", order_id)
@@ -1128,7 +1339,7 @@ async def handle_purchase_receipt(message: Message, state: FSMContext):
         country_code=country_code,
         service_code=service_code,
         duration_code=duration_code,
-        price=price_for(service_code, duration_code),
+        price=price_for(service_code, duration_code, country_code),
         receipt_chat_id=message.chat.id,
         receipt_message_id=message.message_id,
     )
@@ -1159,11 +1370,7 @@ async def handle_purchase_receipt(message: Message, state: FSMContext):
 
     await state.clear()
     await message.answer(
-        "Чек принят ✅\n\n"
-        f"Заявка: <code>#{h(order.order_id)}</code>\n"
-        f"Страна: <b>{h(country_label(country_code))}</b>\n"
-        f"Сумма: <b>{order.price} ₽</b>\n\n"
-        "Администратор проверит оплату. После подтверждения бот сам пришлёт ключ или продлит доступ.",
+        receipt_accepted_text(order),
         reply_markup=main_menu_kb(message.from_user.id),
     )
 
@@ -1290,6 +1497,11 @@ async def callback_proxy_unavailable(callback: CallbackQuery):
     await callback.answer("Proxy в США пока недоступен. Выбери VPN или Германию.", show_alert=True)
 
 
+@dp.callback_query(F.data == "buy_bundle_vpn_only")
+async def callback_bundle_vpn_only(callback: CallbackQuery):
+    await callback.answer("Комплект включает VPN в Германии и США. Proxy в него не входит.", show_alert=True)
+
+
 @dp.callback_query(F.data.startswith("buy_back_services_"))
 async def callback_buy_back_services(callback: CallbackQuery):
     country_code = remove_prefix(callback.data, "buy_back_services_")
@@ -1314,10 +1526,15 @@ async def callback_buy_service(callback: CallbackQuery):
         await callback.answer("Эта услуга в выбранной стране пока недоступна.", show_alert=True)
         return
     service = SERVICE_OPTIONS[service_code]
+    promo_text = (
+        "Комплект: две страны по цене ×1,5"
+        if country_code == BUNDLE_COUNTRY_CODE
+        else f"−{PROMO_DISCOUNT_PERCENT}%"
+    )
     await callback.message.edit_text(
         f"Страна: <b>{h(country_label(country_code))}</b>\n"
         f"Услуга: <b>{h(service['title'])}</b>\n"
-        f"Акция: <b>−{PROMO_DISCOUNT_PERCENT}%</b>\n\n"
+        f"Акция: <b>{h(promo_text)}</b>\n\n"
         "Теперь выбери срок:",
         reply_markup=duration_choice_kb_user(country_code, service_code),
     )
@@ -1340,8 +1557,13 @@ async def callback_buy_duration(callback: CallbackQuery):
 
     service = SERVICE_OPTIONS[service_code]
     duration = DURATION_OPTIONS[duration_code]
-    price = price_for(service_code, duration_code)
-    original_price = original_price_for(service_code, duration_code)
+    price = price_for(service_code, duration_code, country_code)
+    original_price = original_price_for(service_code, duration_code, country_code)
+    original_price_label = (
+        "Две страны отдельно"
+        if country_code == BUNDLE_COUNTRY_CODE
+        else "Обычная цена"
+    )
 
     await callback.message.edit_text(
         (
@@ -1349,7 +1571,7 @@ async def callback_buy_duration(callback: CallbackQuery):
             f"Страна: <b>{h(country_label(country_code))}</b>\n"
             f"Тариф: <b>{h(service['title'])}</b>\n"
             f"Срок: <b>{h(duration['title'])}</b>\n"
-            f"Обычная цена: <s>{original_price} ₽</s>\n"
+            f"{original_price_label}: <s>{original_price} ₽</s>\n"
             f"По акции: <b>{price} ₽</b>\n\n"
             "Оплати по кнопке ниже, вернись в бот и нажми «Я оплатил — отправить чек»."
         ),
@@ -1415,8 +1637,8 @@ async def callback_order_confirm(callback: CallbackQuery, state: FSMContext):
         return
 
     service = SERVICE_OPTIONS[order.service_code]
-    existing_key = get_vpn_key(user, order.country_code)
-    if service["vpn"] and not existing_key:
+    missing_country_codes = missing_vpn_country_codes(user, order.country_code)
+    if service["vpn"] and missing_country_codes:
         if order.status in {"pending", "processing"}:
             order = transition_purchase_order(
                 order_id,
@@ -1432,23 +1654,28 @@ async def callback_order_confirm(callback: CallbackQuery, state: FSMContext):
             return
 
         await state.set_state(AdminStates.waiting_order_vpn_key)
-        await state.update_data(order_id=order_id)
+        await state.update_data(
+            order_id=order_id,
+            missing_country_codes=missing_country_codes,
+        )
+        waiting_text = (
+            "⏳ Оплата подтверждается: ожидаются VPN ключи."
+            if len(missing_country_codes) > 1
+            else "⏳ Оплата подтверждается: ожидается VPN ключ."
+        )
         await callback.message.edit_text(
-            processed_order_text(order, user, "⏳ Оплата подтверждается: ожидается VPN ключ."),
+            processed_order_text(order, user, waiting_text),
             reply_markup=order_review_kb(order.order_id),
         )
         try:
-            await callback.bot.send_message(
-                callback.from_user.id,
-                f"Пришли VPN ключ для заявки <code>#{h(order_id)}</code>.\n"
-                f"Страна: <b>{h(country_label(order.country_code))}</b>\n"
-                "Формат: <code>vpn://...</code>",
+            await callback.message.answer(
+                order_vpn_key_request_text(order, missing_country_codes)
             )
         except Exception:
             transition_purchase_order(order_id, {"awaiting_key"}, "pending")
             await state.clear()
             await callback.answer(
-                "Не могу написать тебе лично. Сначала открой бота в личке и нажми /start.",
+                "Не удалось отправить запрос ключа в админский чат.",
                 show_alert=True,
             )
             return
@@ -1535,6 +1762,80 @@ async def callback_admin_panel(callback: CallbackQuery):
     await show_admin_panel(callback)
 
 
+@dp.callback_query(F.data == "adm_test_messages")
+async def callback_admin_test_messages(callback: CallbackQuery):
+    if not await ensure_admin_callback(callback):
+        return
+
+    test_order = SimpleNamespace(
+        order_id="test0000",
+        user_id=callback.from_user.id,
+        country_code=BUNDLE_COUNTRY_CODE,
+        service_code="vpn",
+        duration_code="1m",
+        price=price_for("vpn", "1m", BUNDLE_COUNTRY_CODE),
+    )
+    test_user = SimpleNamespace(
+        user_id=callback.from_user.id,
+        username=callback.from_user.username or "test_user",
+        access_until=utc_now() + timedelta(days=30),
+        vpn_key="vpn://TEST-GERMANY",
+        vpn_keys={
+            "de": "vpn://TEST-GERMANY",
+            "us": "vpn://TEST-USA",
+        },
+    )
+
+    try:
+        await callback.bot.send_message(
+            callback.from_user.id,
+            "🧪 <b>Тест сообщений VPNyasha</b>\n\n"
+            "Ниже бот покажет сообщения покупателя и администратора на примере комплекта. "
+            "Это предпросмотр: заявка не создаётся, срок не начисляется, тестовые кнопки ничего не меняют.",
+        )
+        await callback.bot.send_message(
+            callback.from_user.id,
+            receipt_accepted_text(test_order),
+        )
+        await callback.bot.send_message(
+            callback.from_user.id,
+            purchase_order_text(test_order, test_user),
+            reply_markup=admin_test_order_kb(),
+        )
+        await callback.bot.send_message(
+            callback.from_user.id,
+            order_vpn_key_request_text(test_order, list(BUNDLE_VPN_COUNTRIES)),
+        )
+        await callback.bot.send_message(
+            callback.from_user.id,
+            build_access_message(
+                test_user,
+                BUNDLE_COUNTRY_CODE,
+                "vpn",
+                "1m",
+                vpn_keys=test_user.vpn_keys,
+            ),
+            reply_markup=download_links_kb(),
+            disable_web_page_preview=True,
+        )
+    except Exception:
+        logging.exception("Failed to send admin message preview to %s", callback.from_user.id)
+        await callback.answer(
+            "Не могу отправить предпросмотр в личку. Открой бота лично, нажми /start и повтори.",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer("Тестовые сообщения отправлены в личку")
+
+
+@dp.callback_query(F.data.startswith("adm_test_noop_"))
+async def callback_admin_test_noop(callback: CallbackQuery):
+    if not await ensure_admin_callback(callback):
+        return
+    await callback.answer("Это тестовая кнопка — данные не изменены.", show_alert=True)
+
+
 @dp.callback_query(F.data == "adm_orders")
 async def callback_admin_orders(callback: CallbackQuery):
     if not await ensure_admin_callback(callback):
@@ -1559,7 +1860,7 @@ async def callback_admin_order(callback: CallbackQuery):
         return
     status_labels = {
         "pending": "⏳ Ожидает решения администратора.",
-        "awaiting_key": "⏳ Оплата подтверждается: ожидается VPN ключ.",
+        "awaiting_key": "⏳ Оплата подтверждается: ожидаются VPN ключи.",
         "processing": "⏳ Выдача была начата; подтверждение можно безопасно повторить.",
     }
     await callback.message.edit_text(
@@ -1672,20 +1973,24 @@ async def callback_admin_duration(callback: CallbackQuery, state: FSMContext):
 
     service = SERVICE_OPTIONS[service_code]
     duration = DURATION_OPTIONS[duration_code]
-    existing_key = get_vpn_key(user, country_code)
-    if service["vpn"] and not existing_key:
+    missing_country_codes = missing_vpn_country_codes(user, country_code)
+    if service["vpn"] and missing_country_codes:
         await state.set_state(AdminStates.waiting_vpn_key)
         await state.update_data(
             target_user_id=target_user_id,
             country_code=country_code,
             service_code=service_code,
             duration_code=duration_code,
+            missing_country_codes=missing_country_codes,
         )
         await callback.message.answer(
-            f"Пришли VPN ключ для {format_user_name(user)}.\n"
-            f"Страна: <b>{h(country_label(country_code))}</b>\n"
-            f"Тариф: <b>{h(service['title'])}</b>, срок: <b>{h(duration['title'])}</b>\n\n"
-            "Формат: <code>vpn://...</code>"
+            manual_vpn_key_request_text(
+                user,
+                country_code,
+                service_code,
+                duration_code,
+                missing_country_codes,
+            )
         )
         await callback.answer("Жду ключ")
         return
@@ -1696,12 +2001,18 @@ async def callback_admin_duration(callback: CallbackQuery, state: FSMContext):
         country_code,
         service_code,
         duration_code,
-        extension_only=bool(service["vpn"] and existing_key),
+        extension_only=bool(service["vpn"] and not missing_country_codes),
     )
     if not granted_user:
         await callback.answer("Пользователь не найден", show_alert=True)
         return
-    key_text = "\nVPN ключ оставлен прежним." if service["vpn"] and existing_key else ""
+    key_text = ""
+    if service["vpn"]:
+        key_text = (
+            "\nVPN ключи оставлены прежними."
+            if country_code == BUNDLE_COUNTRY_CODE
+            else "\nVPN ключ оставлен прежним."
+        )
     bonus_text = "\nРеферальный бонус начислен 🎁" if referral_bonus else ""
     await callback.message.edit_text(
         f"{format_user_name(granted_user)} получил доступ до "
