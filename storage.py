@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 import json
 import os
 import random
@@ -92,7 +92,7 @@ def _format_dt(value: Optional[datetime]) -> Optional[str]:
     return normalize_dt(value).isoformat() if value else None
 
 
-def _generate_referral_code(used_codes: Optional[set[str]] = None) -> str:
+def _generate_referral_code(used_codes: Optional[Set[str]] = None) -> str:
     if used_codes is None:
         used_codes = {u.referral_code for u in users.values() if u.referral_code}
     while True:
@@ -147,7 +147,7 @@ def load_users():
 
         now = utc_now()
         changed = False
-        used_codes: set[str] = set()
+        used_codes: Set[str] = set()
         for uid, raw in data.items():
             user_id = int(raw.get("user_id") or uid)
             referral_code = str(raw.get("referral_code") or "").strip()
@@ -400,7 +400,7 @@ def set_order_admin_message(order_id: str, message_id: int) -> Optional[Purchase
 
 def transition_purchase_order(
     order_id: str,
-    expected_statuses: set[str],
+    expected_statuses: Set[str],
     new_status: str,
     reviewed_by: Optional[int] = None,
 ) -> Optional[PurchaseOrder]:

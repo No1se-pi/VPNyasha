@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
@@ -128,6 +128,12 @@ def is_admin(user_id: int) -> bool:
 
 def h(value: object) -> str:
     return escape(str(value or ""))
+
+
+def remove_prefix(value: str, prefix: str) -> str:
+    if value.startswith(prefix):
+        return value[len(prefix):]
+    return value
 
 
 def format_dt(dt: Optional[datetime]) -> str:
@@ -432,7 +438,7 @@ def find_user_by_admin_input(raw_value: str):
     return next((user for user in users.values() if user.username.lower() == raw_target.lower()), None)
 
 
-def admin_users_text(page: int) -> tuple[str, InlineKeyboardMarkup]:
+def admin_users_text(page: int) -> Tuple[str, InlineKeyboardMarkup]:
     all_users = sorted_users_for_admin()
     total_pages = max((len(all_users) - 1) // ADMIN_PAGE_SIZE + 1, 1)
     page = max(0, min(page, total_pages - 1))
@@ -465,7 +471,7 @@ def admin_users_text(page: int) -> tuple[str, InlineKeyboardMarkup]:
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
 
 
-def admin_orders_text() -> tuple[str, InlineKeyboardMarkup]:
+def admin_orders_text() -> Tuple[str, InlineKeyboardMarkup]:
     open_orders = sorted(
         get_open_purchase_orders(),
         key=lambda order: order.created_at or datetime.min.replace(tzinfo=timezone.utc),
@@ -1268,7 +1274,7 @@ async def callback_buy_back_countries(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy_country_"))
 async def callback_buy_country(callback: CallbackQuery):
-    country_code = callback.data.removeprefix("buy_country_")
+    country_code = remove_prefix(callback.data, "buy_country_")
     if country_code not in COUNTRY_OPTIONS:
         await callback.answer("Неизвестная страна", show_alert=True)
         return
@@ -1286,7 +1292,7 @@ async def callback_proxy_unavailable(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("buy_back_services_"))
 async def callback_buy_back_services(callback: CallbackQuery):
-    country_code = callback.data.removeprefix("buy_back_services_")
+    country_code = remove_prefix(callback.data, "buy_back_services_")
     if country_code not in COUNTRY_OPTIONS:
         await callback.answer("Неизвестная страна", show_alert=True)
         return
@@ -1392,7 +1398,7 @@ async def callback_cancel_receipt(callback: CallbackQuery, state: FSMContext):
 async def callback_order_confirm(callback: CallbackQuery, state: FSMContext):
     if not await ensure_admin_callback(callback):
         return
-    order_id = callback.data.removeprefix("order_confirm_")
+    order_id = remove_prefix(callback.data, "order_confirm_")
     order = get_purchase_order(order_id)
     if not order:
         await callback.answer("Заявка не найдена.", show_alert=True)
@@ -1475,7 +1481,7 @@ async def callback_order_confirm(callback: CallbackQuery, state: FSMContext):
 async def callback_order_reject(callback: CallbackQuery):
     if not await ensure_admin_callback(callback):
         return
-    order_id = callback.data.removeprefix("order_reject_")
+    order_id = remove_prefix(callback.data, "order_reject_")
     order = get_purchase_order(order_id)
     if not order:
         await callback.answer("Заявка не найдена.", show_alert=True)
@@ -1542,7 +1548,7 @@ async def callback_admin_orders(callback: CallbackQuery):
 async def callback_admin_order(callback: CallbackQuery):
     if not await ensure_admin_callback(callback):
         return
-    order_id = callback.data.removeprefix("adm_order_")
+    order_id = remove_prefix(callback.data, "adm_order_")
     order = get_purchase_order(order_id)
     if not order or order.status not in {"pending", "awaiting_key", "processing"}:
         await callback.answer("Заявка уже обработана или не найдена.", show_alert=True)
@@ -1567,7 +1573,7 @@ async def callback_admin_order(callback: CallbackQuery):
 async def callback_admin_users(callback: CallbackQuery):
     if not await ensure_admin_callback(callback):
         return
-    page = int(callback.data.removeprefix("adm_page_"))
+    page = int(remove_prefix(callback.data, "adm_page_"))
     text, keyboard = admin_users_text(page)
     await callback.message.edit_text(text, reply_markup=keyboard)
     await callback.answer()
@@ -1589,7 +1595,7 @@ async def callback_admin_add_user(callback: CallbackQuery, state: FSMContext):
 async def callback_admin_user(callback: CallbackQuery):
     if not await ensure_admin_callback(callback):
         return
-    target_user_id = int(callback.data.removeprefix("adm_user_"))
+    target_user_id = int(remove_prefix(callback.data, "adm_user_"))
     user = users.get(target_user_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
@@ -1602,7 +1608,7 @@ async def callback_admin_user(callback: CallbackQuery):
 async def callback_admin_grant(callback: CallbackQuery):
     if not await ensure_admin_callback(callback):
         return
-    target_user_id = int(callback.data.removeprefix("adm_grant_"))
+    target_user_id = int(remove_prefix(callback.data, "adm_grant_"))
     user = users.get(target_user_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
@@ -1709,7 +1715,7 @@ async def callback_admin_duration(callback: CallbackQuery, state: FSMContext):
 async def callback_admin_disable(callback: CallbackQuery):
     if not await ensure_admin_callback(callback):
         return
-    target_user_id = int(callback.data.removeprefix("adm_disable_"))
+    target_user_id = int(remove_prefix(callback.data, "adm_disable_"))
     user = disable_access(target_user_id)
     if not user:
         await callback.answer("Пользователь не найден", show_alert=True)
