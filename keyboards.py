@@ -7,11 +7,13 @@ from aiogram.types import (
 def main_menu_kb() -> ReplyKeyboardMarkup:
     kb = [
         [
-            KeyboardButton(text="Регистрация 📝"),
             KeyboardButton(text="Подключиться к VPN ⚡"),
         ],
         [
             KeyboardButton(text="Мой профиль 😎"),
+        ],
+        [
+            KeyboardButton(text="Акции 🔥"),
         ],
     ]
     return ReplyKeyboardMarkup(
@@ -24,11 +26,8 @@ def vpn_choice_kb() -> InlineKeyboardMarkup:
     kb = [
         [
             InlineKeyboardButton(text="🇩🇪 Германия", callback_data="vpn_germany"),
-            InlineKeyboardButton(text="🇧🇾 Беларусь", callback_data="vpn_belarus"),
+            InlineKeyboardButton(text="🇺🇸 США", callback_data="vpn_usa"),
         ],
-        [
-            InlineKeyboardButton(text="🌍 Оба направления", callback_data="vpn_both"),
-        ]
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 

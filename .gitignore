@@ -2,5 +2,6 @@
 /__pycache__/
 bot.log
 users.json
+orders.json
 /images/
 .env
