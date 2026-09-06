@@ -1,8 +1,6 @@
 import asyncio
 import logging
-import subprocess
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,7 +55,6 @@ logging.basicConfig(level=logging.INFO)
 dp = Dispatcher(storage=MemoryStorage(), fsm_strategy=FSMStrategy.GLOBAL_USER)
 
 BASE_DIR = Path(__file__).resolve().parent
-PROXY_FILE = BASE_DIR / "proxy_url.txt"
 MOSCOW_TZ = timezone(timedelta(hours=3))
 GRACE_PERIOD_DAYS = 3
 ADMIN_PAGE_SIZE = 8
@@ -69,33 +66,27 @@ STICKERS_CONNECT = [
 ]
 
 SERVICE_OPTIONS = {
-    "vpn": {"title": "VPN", "price": 150, "vpn": True, "proxy": False},
-    "proxy": {"title": "Proxy", "price": 50, "vpn": False, "proxy": True},
-    "both": {"title": "VPN + Proxy", "price": 200, "vpn": True, "proxy": True},
+    "vpn": {"title": "VPN", "price": 150, "vpn": True},
 }
 
 COUNTRY_OPTIONS = {
-    "de": {"title": "Германия", "flag": "🇩🇪", "proxy_available": True},
-    "us": {"title": "США", "flag": "🇺🇸", "proxy_available": False},
+    "ru": {"title": "Россия", "flag": "🇷🇺"},
+    "us": {"title": "США", "flag": "🇺🇸"},
     "bundle": {
         "title": "Комплект",
-        "flag": "🇩🇪 + 🇺🇸",
-        "proxy_available": False,
+        "flag": "🇷🇺 + 🇺🇸",
     },
 }
 
-PROMO_DISCOUNT_PERCENT = Decimal("33.33")
-PROMO_PRICE_FACTOR = Decimal("0.6667")
-BUNDLE_PRICE_MULTIPLIER = Decimal("1.5")
 BUNDLE_COUNTRY_CODE = "bundle"
-BUNDLE_VPN_COUNTRIES = ("de", "us")
+BUNDLE_VPN_COUNTRIES = ("ru", "us")
 
 DURATION_OPTIONS = {
-    "1m": {"title": "1 месяц", "days": 30, "months": 1},
-    "2m": {"title": "2 месяца", "days": 60, "months": 2},
-    "3m": {"title": "3 месяца", "days": 90, "months": 3},
-    "6m": {"title": "полгода", "days": 180, "months": 6},
-    "12m": {"title": "год", "days": 365, "months": 12},
+    "1m": {"title": "1 месяц", "days": 30, "months": 1, "price": 150, "discount": 0},
+    "2m": {"title": "2 месяца", "days": 60, "months": 2, "price": 290, "discount": 3},
+    "3m": {"title": "3 месяца", "days": 90, "months": 3, "price": 420, "discount": 7},
+    "6m": {"title": "полгода", "days": 180, "months": 6, "price": 800, "discount": 11},
+    "12m": {"title": "год", "days": 365, "months": 12, "price": 1500, "discount": 17},
 }
 
 DOWNLOAD_LINKS = {
@@ -164,17 +155,14 @@ def plain_user_name(user) -> str:
 
 
 def services_text(user) -> str:
-    services = []
-    if user.has_vpn:
-        services.append("VPN")
-    if user.has_proxy:
-        services.append("Proxy")
-    return " + ".join(services) if services else "нет активной услуги"
+    return "VPN" if user.has_vpn else "нет активной услуги"
 
 
 def country_label(country_code: str) -> str:
     country = COUNTRY_OPTIONS.get(country_code)
     if not country:
+        if country_code == "de":
+            return "🇩🇪 Германия (архив)"
         return "Страна не указана"
     return f"{country['flag']} {country['title']}"
 
@@ -213,50 +201,38 @@ def parse_vpn_keys(raw_value: str, country_codes: List[str]) -> Optional[Dict[st
 def service_available(country_code: str, service_code: str) -> bool:
     country = COUNTRY_OPTIONS.get(country_code)
     service = SERVICE_OPTIONS.get(service_code)
-    if not country or not service:
-        return False
-    if country_code == BUNDLE_COUNTRY_CODE:
-        return service_code == "vpn"
-    return country["proxy_available"] or not service["proxy"]
+    return bool(country and service and service_code == "vpn")
 
 
 def original_price_for(
     service_code: str,
     duration_code: str,
-    country_code: str = "de",
+    country_code: str = "ru",
 ) -> int:
-    original_price = SERVICE_OPTIONS[service_code]["price"] * DURATION_OPTIONS[duration_code]["months"]
+    duration = DURATION_OPTIONS[duration_code]
     if country_code == BUNDLE_COUNTRY_CODE:
-        single_promo_price = int(
-            (Decimal(original_price) * PROMO_PRICE_FACTOR).quantize(
-                Decimal("1"),
-                rounding=ROUND_HALF_UP,
-            )
-        )
-        return single_promo_price * 2
-    return original_price
+        return duration["price"] * 2
+    return SERVICE_OPTIONS[service_code]["price"] * duration["months"]
 
 
 def price_for(
     service_code: str,
     duration_code: str,
-    country_code: str = "de",
+    country_code: str = "ru",
 ) -> int:
-    single_original_price = original_price_for(service_code, duration_code)
-    single_promo_price = int(
-        (Decimal(single_original_price) * PROMO_PRICE_FACTOR).quantize(
-            Decimal("1"),
-            rounding=ROUND_HALF_UP,
-        )
-    )
+    single_price = DURATION_OPTIONS[duration_code]["price"]
     if country_code == BUNDLE_COUNTRY_CODE:
-        return int(
-            (Decimal(single_promo_price) * BUNDLE_PRICE_MULTIPLIER).quantize(
-                Decimal("1"),
-                rounding=ROUND_HALF_UP,
-            )
-        )
-    return single_promo_price
+        return single_price * 3 // 2
+    return single_price
+
+
+def country_choice_text(prefix: str = "Выбери страну подключения:") -> str:
+    return (
+        f"{prefix}\n\n"
+        "🇷🇺 <b>Россия</b> — полноценный VPN для обычного защищённого подключения. "
+        "Подключение и защита трафика работают так же, как при выборе другого региона, "
+        "а российские сайты и сервисы при этом открываются стабильно."
+    )
 
 
 def short_status_text(user, now: Optional[datetime] = None) -> str:
@@ -265,7 +241,7 @@ def short_status_text(user, now: Optional[datetime] = None) -> str:
         return "доступ не выдан"
 
     access_until = normalize_dt(user.access_until)
-    if user.has_vpn or user.has_proxy:
+    if user.has_vpn:
         if access_until > now:
             days_left = max((access_until - now).days, 0)
             return f"активен до {format_dt(access_until)} ({days_left} дн.)"
@@ -294,12 +270,12 @@ def country_choice_kb_user() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🇩🇪 Германия", callback_data="buy_country_de"),
+                InlineKeyboardButton(text="🇷🇺 Россия", callback_data="buy_country_ru"),
                 InlineKeyboardButton(text="🇺🇸 США", callback_data="buy_country_us"),
             ],
             [
                 InlineKeyboardButton(
-                    text="🇩🇪 + 🇺🇸 Комплект ×1,5",
+                    text="🇷🇺 + 🇺🇸 Комплект ×1,5",
                     callback_data="buy_country_bundle",
                 )
             ],
@@ -309,21 +285,6 @@ def country_choice_kb_user() -> InlineKeyboardMarkup:
 
 def access_choice_kb_user(country_code: str) -> InlineKeyboardMarkup:
     keyboard = [[InlineKeyboardButton(text="VPN", callback_data=f"buy_svc_{country_code}_vpn")]]
-    if COUNTRY_OPTIONS[country_code]["proxy_available"]:
-        keyboard.extend(
-            [
-                [InlineKeyboardButton(text="Proxy", callback_data=f"buy_svc_{country_code}_proxy")],
-                [InlineKeyboardButton(text="VPN + Proxy", callback_data=f"buy_svc_{country_code}_both")],
-            ]
-        )
-    elif country_code == "us":
-        keyboard.append(
-            [InlineKeyboardButton(text="Proxy — скоро", callback_data="buy_proxy_unavailable")]
-        )
-    else:
-        keyboard.append(
-            [InlineKeyboardButton(text="В комплекте только VPN", callback_data="buy_bundle_vpn_only")]
-        )
     keyboard.append([InlineKeyboardButton(text="← К выбору страны", callback_data="buy_back_countries")])
     return InlineKeyboardMarkup(inline_keyboard=keyboard)
 
@@ -331,12 +292,12 @@ def access_choice_kb_user(country_code: str) -> InlineKeyboardMarkup:
 def duration_choice_kb_user(country_code: str, service_code: str) -> InlineKeyboardMarkup:
     keyboard = []
     for duration_code, option in DURATION_OPTIONS.items():
-        original_price = original_price_for(service_code, duration_code, country_code)
         price = price_for(service_code, duration_code, country_code)
+        discount_suffix = f" · −{option['discount']}%" if option["discount"] else ""
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    text=f"{option['title']} — {original_price}→{price}₽",
+                    text=f"{option['title']} — {price}₽{discount_suffix}",
                     callback_data=f"buy_dur_{country_code}_{service_code}_{duration_code}",
                 )
             ]
@@ -428,12 +389,12 @@ def admin_country_kb(user_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🇩🇪 Германия", callback_data=f"adm_country_{user_id}_de"),
+                InlineKeyboardButton(text="🇷🇺 Россия", callback_data=f"adm_country_{user_id}_ru"),
                 InlineKeyboardButton(text="🇺🇸 США", callback_data=f"adm_country_{user_id}_us"),
             ],
             [
                 InlineKeyboardButton(
-                    text="🇩🇪 + 🇺🇸 Комплект ×1,5",
+                    text="🇷🇺 + 🇺🇸 Комплект ×1,5",
                     callback_data=f"adm_country_{user_id}_bundle",
                 )
             ],
@@ -446,18 +407,6 @@ def admin_service_kb(user_id: int, country_code: str) -> InlineKeyboardMarkup:
     keyboard = [
         [InlineKeyboardButton(text="VPN", callback_data=f"adm_svc_{user_id}_{country_code}_vpn")]
     ]
-    if COUNTRY_OPTIONS[country_code]["proxy_available"]:
-        keyboard.extend(
-            [
-                [InlineKeyboardButton(text="Proxy", callback_data=f"adm_svc_{user_id}_{country_code}_proxy")],
-                [
-                    InlineKeyboardButton(
-                        text="VPN + Proxy",
-                        callback_data=f"adm_svc_{user_id}_{country_code}_both",
-                    )
-                ],
-            ]
-        )
     keyboard.append(
         [InlineKeyboardButton(text="Назад", callback_data=f"adm_grant_{user_id}")]
     )
@@ -508,7 +457,7 @@ def sorted_users_for_admin():
     now = utc_now()
 
     def rank(user):
-        if user.has_vpn or user.has_proxy:
+        if user.has_vpn:
             if user.access_until:
                 access_until = normalize_dt(user.access_until)
                 if access_until > now:
@@ -608,9 +557,9 @@ def admin_dashboard_text() -> str:
         if not user.access_until:
             continue
         access_until = normalize_dt(user.access_until)
-        if (user.has_vpn or user.has_proxy) and access_until > now:
+        if user.has_vpn and access_until > now:
             active += 1
-        elif (user.has_vpn or user.has_proxy) and access_until + timedelta(days=GRACE_PERIOD_DAYS) > now:
+        elif user.has_vpn and access_until + timedelta(days=GRACE_PERIOD_DAYS) > now:
             grace += 1
         elif user.disabled_at:
             disabled += 1
@@ -648,7 +597,7 @@ def user_detail_text(user) -> str:
         for country_code, key in user.vpn_keys.items():
             lines.append(f"{h(country_label(country_code))}:\n<pre>{h(key)}</pre>")
     elif user.vpn_key:
-        lines.append(f"\n<b>VPN ключ 🇩🇪:</b>\n<pre>{h(user.vpn_key)}</pre>")
+        lines.append(f"\n<b>VPN ключ 🇩🇪 (архив):</b>\n<pre>{h(user.vpn_key)}</pre>")
     return "\n".join(lines)
 
 
@@ -686,12 +635,12 @@ def referral_text(user) -> str:
 def promotions_text() -> str:
     return (
         "<b>Акции VPNyasha 🔥</b>\n\n"
-        "<b>🇺🇸 США на старте: −33,33% на всё</b>\n"
-        "Пока знакомим нашу VPNяшу с новым сервером, все тарифы во всех странах дешевле на треть. "
-        "Например, VPN на месяц: <s>150 ₽</s> → <b>100 ₽</b>.\n\n"
-        "<b>🇩🇪 + 🇺🇸 Комплект двух стран</b>\n"
-        "Германия и США вместе стоят не ×2, а всего <b>×1,5</b> от одного VPN-тарифа. "
-        "На месяц это <s>200 ₽</s> → <b>150 ₽</b> по текущим акционным ценам.\n\n"
+        "<b>📅 Чем дольше — тем выгоднее</b>\n"
+        "Скидка растёт вместе со сроком: до <b>17%</b> на год. "
+        "Год VPN стоит <b>1500 ₽</b> вместо 1800 ₽.\n\n"
+        "<b>🇷🇺 + 🇺🇸 Комплект двух стран</b>\n"
+        "Россия и США вместе стоят не ×2, а всего <b>×1,5</b> от выбранного VPN-тарифа. "
+        "Например, на месяц: <s>300 ₽</s> → <b>225 ₽</b>.\n\n"
         "<b>🎁 Интернет по дружбе</b>\n"
         f"Пригласи друга по своему коду — после его первой подтверждённой оплаты получишь "
         f"<b>{REFERRAL_BONUS_DAYS} дней</b> доступа. Друг получает VPN, ты — ещё две недели. "
@@ -706,11 +655,9 @@ def help_text() -> str:
         "Это защищённый туннель для интернета через удалённый сервер. "
         "Сайты видят IP сервера, а не твой реальный IP.\n\n"
         "<b>Какие страны доступны?</b>\n"
-        "VPN: 🇩🇪 Германия, 🇺🇸 США или комплект из двух стран за ×1,5 цены. "
-        "Proxy пока доступен только в Германии.\n\n"
-        "<b>Что такое Proxy для Telegram?</b>\n"
-        "Proxy работает только внутри Telegram и помогает открыть Telegram, если он плохо грузится. "
-        "Для сайтов и приложений нужен VPN.\n\n"
+        "VPN: 🇷🇺 Россия, 🇺🇸 США или комплект из двух стран за ×1,5 цены. "
+        "Подключение и защита трафика на российском сервере работают так же, как при выборе "
+        "другого региона, при этом российские сайты и сервисы открываются стабильно.\n\n"
         "<b>Как оплатить?</b>\n"
         "Нажми «Подключиться к VPN ⚡», выбери страну, услугу и срок, оплати по ссылке, "
         "затем отправь чек прямо в бот. Администратор проверит его и выдаст ключ.\n\n"
@@ -722,10 +669,8 @@ def help_text() -> str:
         "5. Импортируй ключ в приложение.\n\n"
         "<b>Сколько устройств можно использовать?</b>\n"
         "Ключ можно добавить на несколько устройств, но одновременно работает только одно активное подключение.\n\n"
-        "<b>VPN и Proxy — в чём разница?</b>\n"
-        "VPN работает для устройства или приложений через AmneziaVPN. Proxy нужен только для Telegram.\n\n"
         "<b>Если Telegram не открывается?</b>\n"
-        "Временно включи любой бесплатный VPN или Telegram Proxy, зайди в Telegram и получи основной ключ в боте.\n\n"
+        "Временно включи любой доступный VPN, зайди в Telegram и получи основной ключ в боте.\n\n"
         "<b>Если ключ не импортируется?</b>\n"
         "Проверь, что ключ скопирован целиком и начинается с <code>vpn://</code>. "
         "Если ошибка остаётся, пришли скрин в поддержку.\n\n"
@@ -734,15 +679,9 @@ def help_text() -> str:
         "При продлении в той же стране VPN ключ остаётся прежним.\n\n"
         "<b>Где мой реферальный код?</b>\n"
         "Открой «Мой профиль 😎» → «Реферальная программа». За оплаченного друга начисляется 14 дней.\n\n"
-        "<b>VPN или Proxy не работает?</b>\n"
+        "<b>VPN не работает?</b>\n"
         f"Напиши @{h(settings.support_username)} и приложи скрин ошибки."
     )
-
-
-def read_proxy_url() -> str:
-    if not PROXY_FILE.exists():
-        return ""
-    return PROXY_FILE.read_text(encoding="utf-8").strip()
 
 
 async def safe_send_message(bot: Bot, chat_id: int, text: str, **kwargs) -> bool:
@@ -849,20 +788,6 @@ def build_access_message(
             )
         lines.append("")
 
-    if service["proxy"]:
-        proxy_url = read_proxy_url()
-        lines.extend(
-            [
-                "Актуальный Proxy:",
-                (
-                    f"<code>{h(proxy_url)}</code>"
-                    if proxy_url
-                    else "Прокси пока не создан. Я пришлю его отдельным сообщением."
-                ),
-                "",
-            ]
-        )
-
     lines.extend(
         [
             "Для следующего продления снова выбери страну и тариф в боте.",
@@ -891,7 +816,6 @@ async def grant_and_notify(
         target_user_id,
         days=duration["days"],
         vpn=service["vpn"],
-        proxy=service["proxy"],
         vpn_key=vpn_key,
         vpn_keys=vpn_keys,
         country_code=country_code,
@@ -942,16 +866,18 @@ async def grant_and_notify(
 
 
 def purchase_order_text(order, user) -> str:
-    service = SERVICE_OPTIONS[order.service_code]
-    duration = DURATION_OPTIONS[order.duration_code]
+    service = SERVICE_OPTIONS.get(order.service_code)
+    duration = DURATION_OPTIONS.get(order.duration_code)
+    service_title = service["title"] if service else "Устаревшая услуга"
+    duration_title = duration["title"] if duration else order.duration_code
     return (
         "🧾 <b>Новый чек на проверку</b>\n\n"
         f"Заявка: <code>#{h(order.order_id)}</code>\n"
         f"Пользователь: {format_user_name(user)}\n"
         f"ID: <code>{user.user_id}</code>\n"
         f"Страна: <b>{h(country_label(order.country_code))}</b>\n"
-        f"Услуга: <b>{h(service['title'])}</b>\n"
-        f"Срок: <b>{h(duration['title'])}</b>\n"
+        f"Услуга: <b>{h(service_title)}</b>\n"
+        f"Срок: <b>{h(duration_title)}</b>\n"
         f"Сумма по тарифу: <b>{order.price} ₽</b>\n\n"
         "Сверь сумму и реквизиты на чеке, затем подтверди или отклони заявку."
     )
@@ -959,11 +885,7 @@ def purchase_order_text(order, user) -> str:
 
 def receipt_accepted_text(order) -> str:
     key_word = "ключи" if order.country_code == BUNDLE_COUNTRY_CODE else "ключ"
-    delivery_text = (
-        f"пришлёт {key_word} или продлит доступ"
-        if SERVICE_OPTIONS[order.service_code]["vpn"]
-        else "активирует или продлит Proxy"
-    )
+    delivery_text = f"пришлёт {key_word} или продлит доступ"
     return (
         "Чек принят ✅\n\n"
         f"Заявка: <code>#{h(order.order_id)}</code>\n"
@@ -1042,6 +964,8 @@ async def finalize_purchase_order(
     order = get_purchase_order(order_id)
     if not order:
         return None, None, "Заявка не найдена."
+    if order.service_code not in SERVICE_OPTIONS or order.duration_code not in DURATION_OPTIONS:
+        return None, None, "Тариф этой старой заявки больше недоступен. Её можно только отклонить."
 
     user = users.get(order.user_id)
     if not user:
@@ -1400,7 +1324,7 @@ async def btn_connect(message: Message):
     get_or_create_user(message.from_user.id, message.from_user.username)
     sticker_id = random.choice(STICKERS_CONNECT)
     await message.answer_sticker(sticker_id)
-    await message.answer("Сначала выбери страну подключения:", reply_markup=country_choice_kb_user())
+    await message.answer(country_choice_text("Сначала выбери страну подключения:"), reply_markup=country_choice_kb_user())
 
 
 @dp.message(F.text == "Мой профиль 😎")
@@ -1458,7 +1382,7 @@ async def callback_referral_enter(callback: CallbackQuery, state: FSMContext):
 @dp.callback_query(F.data == "extend_access")
 async def callback_extend_access(callback: CallbackQuery):
     await callback.message.edit_text(
-        "Выбери страну, в которой нужно продлить доступ:",
+        country_choice_text("Выбери страну, в которой нужно продлить доступ:"),
         reply_markup=country_choice_kb_user(),
     )
     await callback.answer()
@@ -1467,7 +1391,7 @@ async def callback_extend_access(callback: CallbackQuery):
 @dp.callback_query(F.data == "promo_connect")
 async def callback_promo_connect(callback: CallbackQuery):
     await callback.message.edit_text(
-        "Выбери страну подключения:",
+        country_choice_text(),
         reply_markup=country_choice_kb_user(),
     )
     await callback.answer()
@@ -1475,7 +1399,7 @@ async def callback_promo_connect(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "buy_back_countries")
 async def callback_buy_back_countries(callback: CallbackQuery):
-    await callback.message.edit_text("Выбери страну подключения:", reply_markup=country_choice_kb_user())
+    await callback.message.edit_text(country_choice_text(), reply_markup=country_choice_kb_user())
     await callback.answer()
 
 
@@ -1490,16 +1414,6 @@ async def callback_buy_country(callback: CallbackQuery):
         reply_markup=access_choice_kb_user(country_code),
     )
     await callback.answer()
-
-
-@dp.callback_query(F.data == "buy_proxy_unavailable")
-async def callback_proxy_unavailable(callback: CallbackQuery):
-    await callback.answer("Proxy в США пока недоступен. Выбери VPN или Германию.", show_alert=True)
-
-
-@dp.callback_query(F.data == "buy_bundle_vpn_only")
-async def callback_bundle_vpn_only(callback: CallbackQuery):
-    await callback.answer("Комплект включает VPN в Германии и США. Proxy в него не входит.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("buy_back_services_"))
@@ -1529,7 +1443,7 @@ async def callback_buy_service(callback: CallbackQuery):
     promo_text = (
         "Комплект: две страны по цене ×1,5"
         if country_code == BUNDLE_COUNTRY_CODE
-        else f"−{PROMO_DISCOUNT_PERCENT}%"
+        else "Выгоднее при покупке на долгий срок"
     )
     await callback.message.edit_text(
         f"Страна: <b>{h(country_label(country_code))}</b>\n"
@@ -1565,14 +1479,19 @@ async def callback_buy_duration(callback: CallbackQuery):
         else "Обычная цена"
     )
 
+    comparison_line = (
+        f"{original_price_label}: <s>{original_price} ₽</s>\n"
+        if original_price != price
+        else ""
+    )
     await callback.message.edit_text(
         (
             "<b>Проверь заказ</b>\n\n"
             f"Страна: <b>{h(country_label(country_code))}</b>\n"
             f"Тариф: <b>{h(service['title'])}</b>\n"
             f"Срок: <b>{h(duration['title'])}</b>\n"
-            f"{original_price_label}: <s>{original_price} ₽</s>\n"
-            f"По акции: <b>{price} ₽</b>\n\n"
+            f"{comparison_line}"
+            f"К оплате: <b>{price} ₽</b>\n\n"
             "Оплати по кнопке ниже, вернись в бот и нажми «Я оплатил — отправить чек»."
         ),
         reply_markup=payment_kb(country_code, service_code, duration_code),
@@ -1636,7 +1555,13 @@ async def callback_order_confirm(callback: CallbackQuery, state: FSMContext):
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
 
-    service = SERVICE_OPTIONS[order.service_code]
+    service = SERVICE_OPTIONS.get(order.service_code)
+    if not service or order.duration_code not in DURATION_OPTIONS:
+        await callback.answer(
+            "Тариф этой старой заявки больше недоступен. Отклони её и создай новую заявку.",
+            show_alert=True,
+        )
+        return
     missing_country_codes = missing_vpn_country_codes(user, order.country_code)
     if service["vpn"] and missing_country_codes:
         if order.status in {"pending", "processing"}:
@@ -1779,9 +1704,9 @@ async def callback_admin_test_messages(callback: CallbackQuery):
         user_id=callback.from_user.id,
         username=callback.from_user.username or "test_user",
         access_until=utc_now() + timedelta(days=30),
-        vpn_key="vpn://TEST-GERMANY",
+        vpn_key="",
         vpn_keys={
-            "de": "vpn://TEST-GERMANY",
+            "ru": "vpn://TEST-RUSSIA",
             "us": "vpn://TEST-USA",
         },
     )
@@ -2072,72 +1997,6 @@ async def cmd_add_user(message: Message, command: CommandObject):
     )
 
 
-@dp.message(Command("refresh_proxy_url"))
-async def refresh_proxy_cmd(message: Message):
-    if not is_admin(message.from_user.id):
-        await message.answer("Нет доступа.")
-        return
-    try:
-        result = subprocess.check_output(
-            ["bash", str(BASE_DIR / "rotate-mtproxy-secret.sh")],
-            cwd=str(BASE_DIR),
-            stderr=subprocess.STDOUT,
-        ).decode()
-        proxy_url = next((line.strip() for line in result.splitlines() if line.startswith("tg://proxy")), None)
-        if not proxy_url:
-            await message.answer("Не удалось получить ссылку.")
-            return
-
-        PROXY_FILE.write_text(proxy_url, encoding="utf-8")
-        await message.answer(f"Прокси обновлён:\n{h(proxy_url)}")
-
-        now = utc_now()
-        notified = 0
-        for user in users.values():
-            if user.has_proxy and user.access_until and normalize_dt(user.access_until) > now:
-                instr = (
-                    "📢 Прокси сервер обновлён:\n\n"
-                    f"Используйте актуальный прокси: <code>{h(proxy_url)}</code>\n\n"
-                    "Если старый прокси не работает, удалите его в настройках Telegram."
-                )
-                ok = await safe_send_message(message.bot, user.user_id, instr, parse_mode=ParseMode.HTML)
-                if ok:
-                    notified += 1
-        await message.answer(f"Рассылка активным Proxy-пользователям завершена: {notified}")
-
-    except Exception as exc:
-        await message.answer(f"Ошибка:\n<code>{h(exc)}</code>")
-
-
-@dp.message(Command("proxy"))
-async def send_proxy(message: Message):
-    user = get_or_create_user(message.from_user.id, message.from_user.username)
-    now = utc_now()
-    has_proxy_access = bool(
-        user.has_proxy
-        and user.access_until
-        and normalize_dt(user.access_until) + timedelta(days=GRACE_PERIOD_DAYS) > now
-    )
-    if not has_proxy_access:
-        await message.answer(
-            "Proxy доступен после подтверждённой оплаты тарифа 🇩🇪 Германия → Proxy.\n\n"
-            "Нажми «Подключиться к VPN ⚡» и отправь чек через бот.",
-            reply_markup=main_menu_kb(message.from_user.id),
-        )
-        return
-    proxy_url = read_proxy_url()
-    if not proxy_url:
-        await message.answer("Прокси ещё не создан.")
-        return
-    instr = (
-        "Мини-инструкция подключения:\n"
-        "1. Открой настройки Telegram.\n"
-        "2. Перейди в Данные и память → Настройки прокси.\n"
-        f"3. Используй ссылку: <code>{h(proxy_url)}</code>"
-    )
-    await message.answer(instr, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
-
-
 async def access_watcher(bot: Bot):
     while True:
         now = utc_now()
@@ -2150,7 +2009,7 @@ async def access_watcher(bot: Bot):
             )
 
         for user in list(users.values()):
-            if not user.access_until or not (user.has_vpn or user.has_proxy):
+            if not user.access_until or not user.has_vpn:
                 continue
 
             access_until = normalize_dt(user.access_until)
@@ -2206,7 +2065,7 @@ async def access_watcher(bot: Bot):
                     settings.log_chat_id,
                     (
                         f"⛔ Доступ отключён в базе для {format_user_name(disabled_user)}.\n"
-                        f"Проверь VPN/Proxy на сервере вручную.{key_text}"
+                        f"Проверь VPN на сервере вручную.{key_text}"
                     ),
                     parse_mode=ParseMode.HTML,
                 )

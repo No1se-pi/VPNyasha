@@ -32,7 +32,6 @@ class UserData:
     nickname: str = ""
     access_until: Optional[datetime] = None
     has_vpn: bool = False
-    has_proxy: bool = False
     vpn_key: str = ""
     vpn_keys: Dict[str, str] = field(default_factory=dict)
     last_country: str = ""
@@ -108,7 +107,6 @@ def _user_to_dict(user: UserData) -> dict:
         "nickname": user.nickname,
         "access_until": _format_dt(user.access_until),
         "has_vpn": user.has_vpn,
-        "has_proxy": user.has_proxy,
         "vpn_key": user.vpn_key,
         "vpn_keys": user.vpn_keys,
         "last_country": user.last_country,
@@ -170,13 +168,16 @@ def load_users():
                 changed = True
             last_country = raw.get("last_country") or ("de" if vpn_key else "")
 
+            legacy_has_proxy = bool(raw.get("has_proxy", False))
+            if legacy_has_proxy:
+                changed = True
+
             user = UserData(
                 user_id=user_id,
                 username=username,
                 nickname=nickname,
                 access_until=_parse_dt(raw.get("access_until")),
                 has_vpn=bool(raw.get("has_vpn", False)),
-                has_proxy=bool(raw.get("has_proxy", False)),
                 vpn_key=vpn_key,
                 vpn_keys=vpn_keys,
                 last_country=last_country,
@@ -259,10 +260,9 @@ def grant_access(
     user_id: int,
     days: int,
     vpn: bool = False,
-    proxy: bool = False,
     vpn_key: str = "",
     vpn_keys: Optional[Dict[str, str]] = None,
-    country_code: str = "de",
+    country_code: str = "ru",
     plan_label: str = "",
     order_id: str = "",
 ) -> Optional[UserData]:
@@ -274,7 +274,6 @@ def grant_access(
             return user
         now = utc_now()
         user.has_vpn = vpn
-        user.has_proxy = proxy
         keys_to_store = dict(vpn_keys or {})
         if vpn_key:
             keys_to_store[country_code] = vpn_key
@@ -436,7 +435,7 @@ def extend_access_days(user_id: int, days: int) -> Optional[UserData]:
         user = users.get(user_id)
         if not user:
             return None
-        if not (user.has_vpn or user.has_proxy):
+        if not user.has_vpn:
             user.has_vpn = True
         _extend_user_days(user, days)
         save_users()
@@ -449,7 +448,6 @@ def disable_access(user_id: int) -> Optional[UserData]:
         if not user:
             return None
         user.has_vpn = False
-        user.has_proxy = False
         user.disabled_at = utc_now()
         user.updated_at = user.disabled_at
         save_users()
@@ -504,7 +502,7 @@ def apply_referral_bonus(paid_user_id: int) -> Optional[Tuple[UserData, UserData
             return None
 
         now = utc_now()
-        if not (inviter.has_vpn or inviter.has_proxy):
+        if not inviter.has_vpn:
             inviter.has_vpn = True
         _extend_user_days(inviter, REFERRAL_BONUS_DAYS, now)
         paid_user.referral_rewarded_at = now
@@ -521,15 +519,6 @@ def get_all_users() -> List[UserData]:
     return list(users.values())
 
 
-def get_active_proxy_users() -> List[UserData]:
-    now = utc_now()
-    return [
-        user
-        for user in users.values()
-        if user.has_proxy and user.access_until and normalize_dt(user.access_until) > now
-    ]
-
-
 def is_empty_user(user: UserData) -> bool:
     has_referrals = any(other.referred_by == user.user_id for other in users.values())
     return (
@@ -537,7 +526,6 @@ def is_empty_user(user: UserData) -> bool:
         and not user.nickname
         and not user.access_until
         and not user.has_vpn
-        and not user.has_proxy
         and not user.vpn_key
         and not user.last_plan
         and not user.last_payment_at

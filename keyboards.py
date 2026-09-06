@@ -25,11 +25,11 @@ def main_menu_kb() -> ReplyKeyboardMarkup:
 def vpn_choice_kb() -> InlineKeyboardMarkup:
     kb = [
         [
-            InlineKeyboardButton(text="🇩🇪 Германия", callback_data="buy_country_de"),
+            InlineKeyboardButton(text="🇷🇺 Россия", callback_data="buy_country_ru"),
             InlineKeyboardButton(text="🇺🇸 США", callback_data="buy_country_us"),
         ],
         [
-            InlineKeyboardButton(text="🇩🇪 + 🇺🇸 Комплект ×1,5", callback_data="buy_country_bundle"),
+            InlineKeyboardButton(text="🇷🇺 + 🇺🇸 Комплект ×1,5", callback_data="buy_country_bundle"),
         ],
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
